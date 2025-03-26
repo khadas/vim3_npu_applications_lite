@@ -9,20 +9,24 @@
 #define NN_TENSOR_MAX_DIMENSION_NUMBER 4
 
 /*Preprocess*/
-void densenet_ctc_preprocess(input_image_t imageData, uint8_t *ptr, int nn_width, int nn_height, int channels, vsi_size_t stride, vsi_nn_tensor_t *tensor)
+void densenet_ctc_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn_width, int nn_height, int channels, vsi_nn_tensor_t *tensor)
 {
     int i, j, k;
     float *src = (float *)imageData.data;
-
-    memset(ptr, 0, stride * nn_width * nn_height * channels * sizeof(uint8_t));
-
-    for (i = 0; i < channels; i++) {
-        for (j = 0; j < nn_width; j++) {
-        	for (k = 0; k < nn_height; k++) {
-    			vsi_nn_Float32ToDtype(src[channels * nn_width * k + channels * j + i], &ptr[stride * (nn_width * nn_height * i + nn_width * k + j)], &tensor->attr.dtype);
-    		}
-    	}
-    }
+	vsi_status status = VSI_FAILURE;
+    
+	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+	uint8_t* ptr = (uint8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(uint8_t));
+	
+	for (i = 0; i < channels; i++) {
+	    for (j = 0; j < nn_width; j++) {
+	    	for (k = 0; k < nn_height; k++) {
+				vsi_nn_Float32ToDtype(src[channels * nn_width * k + channels * j + i], &ptr[stride * (nn_width * nn_height * i + nn_width * k + j)], &tensor->attr.dtype);
+			}
+		}
+	}
+	status = vsi_nn_CopyDataToTensor(g_graph, tensor, ptr);
+	free(ptr);
     return;
 }
 
@@ -67,7 +71,6 @@ void densenet_ctc_postprocess(vsi_nn_graph_t *graph, char* result, int* result_l
     int box = 35;
     int class_num = 88;
     int sz[10];
-    uint8_t *tensor_data = NULL;
     float threshold = 0.25;
     float max_conf, conf;
     vsi_status status = VSI_FAILURE;
@@ -84,16 +87,72 @@ void densenet_ctc_postprocess(vsi_nn_graph_t *graph, char* result, int* result_l
     
     for (i = 0; i < graph->output.num; i++) {
         tensor = vsi_nn_GetTensor(graph, graph->output.tensors[i]);
-
-        stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-        tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
         
-        for (j = 0; j < sz[i]; j++)
-        {
-        	vsi_nn_DtypeToFloat32(&tensor_data[stride * j], &predictions[output_cnt], &tensor->attr.dtype);
-        	output_cnt++;
-        }
-        vsi_nn_Free(tensor_data);
+        if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT8) {
+		    int8_t *tensor_data = NULL;
+		    float fl = pow(2., -tensor->attr.dtype.fl);
+
+		    stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+		    tensor_data = (int8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+
+		    for (j = 0; j < sz[i]; j++)
+		    {
+		    	predictions[output_cnt] = tensor_data[stride * j] * fl;
+		    	output_cnt++;
+		    }
+		    vsi_nn_Free(tensor_data);
+		}
+		else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT16) {
+		    int16_t *tensor_data = NULL;
+		    float fl = pow(2., -tensor->attr.dtype.fl);
+
+		    tensor_data = (int16_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+
+		    for (j = 0; j < sz[i]; j++)
+		    {
+		    	predictions[output_cnt] = tensor_data[j] * fl;
+		    	output_cnt++;
+		    }
+		    vsi_nn_Free(tensor_data);
+		}
+		else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_FLOAT16) {
+			uint8_t *tensor_data = NULL;
+			
+			tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+			
+			vx_int16 *data_ptr_32 = (vx_int16 *)tensor_data;
+			
+	    	Float16ToFloat32(data_ptr_32, predictions, sz[i]);
+			vsi_nn_Free(tensor_data);
+		}
+		else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_UINT8) {
+		    uint8_t *tensor_data = NULL;
+		    float scale = tensor->attr.dtype.scale;
+			int zero_point = tensor->attr.dtype.zero_point;
+
+		    stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+		    tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+
+		    for (j = 0; j < sz[i]; j++)
+		    {
+		    	predictions[output_cnt] = (tensor_data[stride * j] - zero_point) * scale;
+		    	output_cnt++;
+		    }
+		    vsi_nn_Free(tensor_data);
+		}
+		else {
+			uint8_t *tensor_data = NULL;
+			
+			stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+			tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+			
+			for (j = 0; j < sz[i]; j++)
+		    {
+		    	vsi_nn_DtypeToFloat32(&tensor_data[stride * j], &predictions[output_cnt], &tensor->attr.dtype);
+		    	output_cnt++;
+		    }
+		    vsi_nn_Free(tensor_data);
+		}
     }
     
     int last_index = class_num - 1;

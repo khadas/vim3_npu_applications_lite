@@ -178,8 +178,6 @@ int run_detect_model(){
 	cv::Mat tmp_image(g_nn_height, g_nn_width, CV_8UC1);
 	struct timeval time_start, time_end;
 	float total_time = 0;
-	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-	uint8_t* input_ptr = (uint8_t*)malloc(stride * g_nn_width * g_nn_height * g_nn_channel * sizeof(uint8_t));
 	vsi_status status = VSI_FAILURE;
 
 	cv::Mat img = cv::imread(picture, 0);
@@ -195,9 +193,8 @@ int run_detect_model(){
 	image.pixel_format = PIX_FMT_RGB888;
 
 	gettimeofday(&time_start, 0);
-	densenet_ctc_preprocess(image, input_ptr, g_nn_width, g_nn_height, g_nn_channel, stride, tensor);
+	densenet_ctc_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, tensor);
 
-	status = vsi_nn_CopyDataToTensor(g_graph, tensor, input_ptr);
 	status = vsi_nn_RunGraph(g_graph);
 	densenet_ctc_postprocess(g_graph, result, &result_len);
 	
@@ -206,7 +203,6 @@ int run_detect_model(){
 	gettimeofday(&time_end, 0);
 	total_time += (float)((time_end.tv_sec - time_start.tv_sec) + (time_end.tv_usec - time_start.tv_usec) / 1000.0f / 1000.0f);
 	printf("time: %f\n", total_time);
-	free(input_ptr);
 	
 	vnn_ReleaseDensenetCtc(g_graph, TRUE);
 	g_graph = NULL;

@@ -216,8 +216,6 @@ int run_detect_model(){
 	int frames = 0;
 	struct timeval time_start, time_end;
 	float total_time = 0;
-	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-	uint8_t* input_ptr = (uint8_t*)malloc(stride * g_nn_width * g_nn_height * g_nn_channel * sizeof(uint8_t));
 	vsi_status status = VSI_FAILURE;
 
     	cv::namedWindow("Image Window");
@@ -255,9 +253,8 @@ int run_detect_model(){
 		image.pixel_format = PIX_FMT_RGB888;
 		
 		gettimeofday(&time_start, 0);
-		yolov7_tiny_preprocess(image, input_ptr, g_nn_width, g_nn_height, g_nn_channel, stride, tensor);
+		yolov7_tiny_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, tensor);
 
-		status = vsi_nn_CopyDataToTensor(g_graph, tensor, input_ptr);
 		status = vsi_nn_RunGraph(g_graph);
 		yolov7_tiny_postprocess(g_graph, &resultData);
 		
@@ -273,7 +270,6 @@ int run_detect_model(){
 			total_time = 0;
 		}
     	}
-    	free(input_ptr);
     
     	vnn_ReleaseYolov7Tiny(g_graph, TRUE);
 	g_graph = NULL;

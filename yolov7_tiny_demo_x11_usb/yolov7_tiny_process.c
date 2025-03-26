@@ -9,19 +9,73 @@
 #define NN_TENSOR_MAX_DIMENSION_NUMBER 4
 
 /*Preprocess*/
-void yolov7_tiny_preprocess(input_image_t imageData, uint8_t *ptr, int nn_width, int nn_height, int channels, vsi_size_t stride, vsi_nn_tensor_t *tensor)
+void yolov7_tiny_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn_width, int nn_height, int channels, vsi_nn_tensor_t *tensor)
 {
     int i, j, k;
     float *src = (float *)imageData.data;
+    vsi_status status = VSI_FAILURE;
 
-    memset(ptr, 0, stride * nn_width * nn_height * channels * sizeof(uint8_t));
+    if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT8) {
+    	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+    	int8_t* ptr = (int8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(int8_t));
+		
+		float fl = pow(2., tensor->attr.dtype.fl);
 
-    for (i = 0; i < channels; i++) {
-        for (j = 0; j < nn_width; j++) {
-        	for (k = 0; k < nn_height; k++) {
-    			vsi_nn_Float32ToDtype(src[channels * nn_width * k + channels * j + i], &ptr[stride * (nn_width * nn_height * i + nn_width * k + j)], &tensor->attr.dtype);
-    		}
-    	}
+		for (i = 0; i < channels; i++) {
+		    for (j = 0; j < nn_width; j++) {
+		    	for (k = 0; k < nn_height; k++) {
+					ptr[stride * (nn_width * nn_height * i + nn_width * k + j)] = src[channels * nn_width * k + channels * j + i] * fl;
+				}
+			}
+		}
+		status = vsi_nn_CopyDataToTensor(g_graph, tensor, ptr);
+		free(ptr);
+    }
+    else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT16) {
+    	int16_t* ptr = (int16_t*)malloc(nn_width * nn_height * channels * sizeof(int16_t));
+		
+		float fl = pow(2., tensor->attr.dtype.fl);
+
+		for (i = 0; i < channels; i++) {
+		    for (j = 0; j < nn_width; j++) {
+		    	for (k = 0; k < nn_height; k++) {
+					ptr[nn_width * nn_height * i + nn_width * k + j] = src[channels * nn_width * k + channels * j + i] * fl;
+				}
+			}
+		}
+		status = vsi_nn_CopyDataToTensor(g_graph, tensor, ptr);
+		free(ptr);
+    }
+    else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_UINT8) {
+    	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+    	uint8_t* ptr = (uint8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(uint8_t));
+		
+		float scale = tensor->attr.dtype.scale;
+		int zero_point = tensor->attr.dtype.zero_point;
+
+		for (i = 0; i < channels; i++) {
+		    for (j = 0; j < nn_width; j++) {
+		    	for (k = 0; k < nn_height; k++) {
+					ptr[stride * (nn_width * nn_height * i + nn_width * k + j)] = src[channels * nn_width * k + channels * j + i] / scale + zero_point;
+				}
+			}
+		}
+		status = vsi_nn_CopyDataToTensor(g_graph, tensor, ptr);
+		free(ptr);
+    }
+    else {
+    	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+    	uint8_t* ptr = (uint8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(uint8_t));
+    	
+    	for (i = 0; i < channels; i++) {
+		    for (j = 0; j < nn_width; j++) {
+		    	for (k = 0; k < nn_height; k++) {
+					vsi_nn_Float32ToDtype(src[channels * nn_width * k + channels * j + i], &ptr[stride * (nn_width * nn_height * i + nn_width * k + j)], &tensor->attr.dtype);
+				}
+			}
+		}
+		status = vsi_nn_CopyDataToTensor(g_graph, tensor, ptr);
+		free(ptr);
     }
     return;
 }
@@ -287,7 +341,6 @@ void yolov7_tiny_postprocess(vsi_nn_graph_t *graph, pDetResult resultData)
     int num_class = 80;
     float threshold = 0.3;
     float iou_threshold = 0.4;
-    uint8_t *tensor_data = NULL;
     float *predictions = NULL;
 
     for (i = 0; i < graph->output.num; i++) {
@@ -302,16 +355,62 @@ void yolov7_tiny_postprocess(vsi_nn_graph_t *graph, pDetResult resultData)
 
     for (i = 0; i < graph->output.num; i++) {
         tensor = vsi_nn_GetTensor(graph, graph->output.tensors[i]);
+        
+        if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT8) {
+		    int8_t *tensor_data = NULL;
+		    float fl = pow(2., -tensor->attr.dtype.fl);
 
-        stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-        tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+		    stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+		    tensor_data = (int8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
 
-        for (j = 0; j < sz[i]; j++)
-        {
-        	vsi_nn_DtypeToFloat32(&tensor_data[stride * j], &predictions[output_cnt], &tensor->attr.dtype);
-        	output_cnt++;
-        }
-        vsi_nn_Free(tensor_data);
+		    for (j = 0; j < sz[i]; j++)
+		    {
+		    	predictions[output_cnt] = tensor_data[stride * j] * fl;
+		    	output_cnt++;
+		    }
+		    vsi_nn_Free(tensor_data);
+		}
+		else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT16) {
+		    int16_t *tensor_data = NULL;
+		    float fl = pow(2., -tensor->attr.dtype.fl);
+
+		    tensor_data = (int16_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+
+		    for (j = 0; j < sz[i]; j++)
+		    {
+		    	predictions[output_cnt] = tensor_data[j] * fl;
+		    	output_cnt++;
+		    }
+		    vsi_nn_Free(tensor_data);
+		}
+		else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_UINT8) {
+		    uint8_t *tensor_data = NULL;
+		    float scale = tensor->attr.dtype.scale;
+			int zero_point = tensor->attr.dtype.zero_point;
+
+		    stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+		    tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+
+		    for (j = 0; j < sz[i]; j++)
+		    {
+		    	predictions[output_cnt] = (tensor_data[stride * j] - zero_point) * scale;
+		    	output_cnt++;
+		    }
+		    vsi_nn_Free(tensor_data);
+		}
+		else {
+			uint8_t *tensor_data = NULL;
+			
+			stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
+			tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+			
+			for (j = 0; j < sz[i]; j++)
+		    {
+		    	vsi_nn_DtypeToFloat32(&tensor_data[stride * j], &predictions[output_cnt], &tensor->attr.dtype);
+		    	output_cnt++;
+		    }
+		    vsi_nn_Free(tensor_data);
+		}
     }
 
     float biases[18] = {10/8., 13/8., 16/8., 30/8., 33/8., 23/8., 30/16., 61/16., 62/16., 45/16., 59/16., 119/16., 116/32., 90/32., 156/32., 198/32., 373/32., 326/32.};
