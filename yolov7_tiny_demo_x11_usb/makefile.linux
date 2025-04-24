@@ -29,10 +29,13 @@ LIBS += -L$(VIVANTE_SDK_LIB) -lOpenVX -lOpenVXU -lGAL -lovxlib -lArchModelSw -lN
 #############################################################################
 # Macros.
 PROGRAM = 1
-CUR_SOURCE = ${wildcard *.c}
+C_CUR_SOURCE = ${wildcard *.c}
+CC_CUR_SOURCE = ${wildcard *.cc}
 #############################################################################
 # Objects.
-OBJECTS =  ${patsubst %.c, $(OBJ_DIR)/%.o, $(CUR_SOURCE)}
+C_OBJECTS =  ${patsubst %.c, $(OBJ_DIR)/%.o, $(C_CUR_SOURCE)}
+CC_OBJECTS =  ${patsubst %.cc, $(OBJ_DIR)/%.o, $(CC_CUR_SOURCE)}
+OBJECTS = $(C_OBJECTS) $(CC_OBJECTS)
 OBJECTS += $(OBJ_DIR)/main.o
 
 # installation directory
@@ -62,6 +65,11 @@ $(OBJ_DIR)/%.o: %.c
 	@echo "  COMPILE $(abspath $<)"
 	@mkdir -p $(OBJ_DIR)
 	@$(CC) -c $(CFLAGS) -o $@ $<
+
+$(OBJ_DIR)/%.o: %.cc
+	@echo "  COMPILE $(abspath $<)"
+	@mkdir -p $(OBJ_DIR)
+	@$(CXX) -c $(CXXFLAGS) -o $@ $<
 
 $(OBJ_DIR)/%.o: %.cpp
 	@echo "  COMPILE $(abspath $<)"

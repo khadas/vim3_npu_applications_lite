@@ -39,6 +39,7 @@
 #include "nn_detect_utils.h"
 #include "retinaface_process.h"
 #include "vnn_retinaface.h"
+#include "camera_util.h"
 
 using namespace std;
 using namespace cv;
@@ -57,12 +58,14 @@ struct option longopts[] = {
 	{ "width",          required_argument,  NULL,   'w' },
 	{ "height",         required_argument,  NULL,   'h' },
 	{ "model",          required_argument,  NULL,   'm' },
+	{ "type",           required_argument,  NULL,   't' },
 	{ "help",           no_argument,        NULL,   'H' },
 	{ 0, 0, 0, 0 }
 };
 
 const char *device = DEFAULT_DEVICE;
 const char *model_path;
+std::string type;
 
 #define MAX_HEIGHT 1080
 #define MAX_WIDTH 1920
@@ -231,24 +234,28 @@ int run_detect_model(){
 	float total_time = 0;
 	vsi_status status = VSI_FAILURE;
 
-    	cv::namedWindow("Image Window");
-
-	string str = device;
-	string res = str.substr(10);
-	cv::VideoCapture cap(stoi(res));
-	cap.set(cv::CAP_PROP_FRAME_WIDTH, width);
-	cap.set(cv::CAP_PROP_FRAME_HEIGHT, height);
-
-	if (!cap.isOpened()) {
-		cout << "capture device failed to open!" << endl;
-		cap.release();
-		exit(-1);
+	int ret;
+	std::string device_number = device;
+	if (type == "usb") {
+		ret = load_usb_camera(device_number, width, height);
 	}
+	else if (type == "mipi") {
+		ret = load_mipi_camera(device_number, width, height);
+	}
+	else {
+		std::cout << "Unsupport camera type : " << type << " !!!" << std::endl;
+		return 0;
+	}
+	
+    cv::namedWindow("Image Window");
 
 	while (true) {
-		if (!cap.read(img)) {
-			cout<<"Capture read error"<<std::endl;
-			break;
+		gettimeofday(&time_start, 0);
+		if (type == "usb") {
+			read_usb_frame(&img);
+		}
+		else if (type == "mipi") {
+			read_mipi_frame(&img);
 		}
 
 		cv::resize(img, tmp_image, tmp_image.size());
@@ -263,7 +270,6 @@ int run_detect_model(){
 		image.channel   = tmp_image.channels();
 		image.pixel_format = PIX_FMT_RGB888;
 
-		gettimeofday(&time_start, 0);
 		retinaface_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, tensor);
 
 		status = vsi_nn_RunGraph(g_graph);
@@ -273,7 +279,7 @@ int run_detect_model(){
 		draw_results(img, resultData, width, height);
 		++frames;
 		total_time += (float)((time_end.tv_sec - time_start.tv_sec) + (time_end.tv_usec - time_start.tv_usec) / 1000.0f / 1000.0f);
-		//printf("time: %f\n", total_time);
+		//printf("total %f ms\n", (float)((time_end.tv_sec - time_start.tv_sec) + (time_end.tv_usec - time_start.tv_usec) / 1000.0f / 1000.0f));
 
 		if (total_time >= 1.0f) {
 			int fps = (int)(frames / total_time);
@@ -281,9 +287,16 @@ int run_detect_model(){
 			frames = 0;
 			total_time = 0;
 		}
-    	}
+    }
+    if (type == "usb") {
+    	close_usb_camera();
+    }
+    else if (type == "mipi") {
+    	close_mipi_camera();
+    }
     
-    	vnn_ReleaseRetinaface(g_graph, TRUE);
+    
+    vnn_ReleaseRetinaface(g_graph, TRUE);
 	g_graph = NULL;
 	
 	return 0;
@@ -291,7 +304,7 @@ int run_detect_model(){
 
 int main(int argc, char** argv){
 	int c;
-	while ((c = getopt_long(argc, argv, "d:w:h:m:H", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "d:w:h:m:t:H", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'd':
 				device = optarg;
@@ -308,11 +321,20 @@ int main(int argc, char** argv){
 			case 'm':
 				model_path  = optarg;
 				break;
+			
+			case 't':
+				type = optarg;
+				break;
 
 			default:
-				printf("%s [-d device] [-w width] [-h height] [-m model] [-H]\n", argv[0]);
+				printf("%s [-d device] [-w width] [-h height] [-m model] [-t type] [-H]\n", argv[0]);
 				exit(1);
 		}
+	}
+	
+	if (type.empty()) {
+		std::cout << "Please choose camera type -t !!!" << std:: endl;
+		return 0;
 	}
 
 	run_detect_model();
