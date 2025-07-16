@@ -183,7 +183,8 @@ int run_detect_model(){
 	cv::Mat img = cv::imread(picture, 0);
 	cv::resize(img, tmp_image, tmp_image.size());
 	tmp_image.convertTo(tmp_image, CV_32FC1);
-	tmp_image = tmp_image / 255.0;
+	float mean[3] = {0, 0, 0};
+	float var = 255.0;
 
 	input_image_t image;
 	image.data      = tmp_image.data;
@@ -193,7 +194,7 @@ int run_detect_model(){
 	image.pixel_format = PIX_FMT_RGB888;
 
 	gettimeofday(&time_start, 0);
-	densenet_ctc_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, tensor);
+	densenet_ctc_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, mean, var, tensor);
 
 	status = vsi_nn_RunGraph(g_graph);
 	densenet_ctc_postprocess(g_graph, result, &result_len);

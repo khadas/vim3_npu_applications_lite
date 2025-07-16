@@ -248,7 +248,8 @@ int run_detect_model(){
 		cv::resize(img, tmp_image, tmp_image.size());
 		cv::cvtColor(tmp_image, tmp_image, cv::COLOR_BGR2RGB);
 		tmp_image.convertTo(tmp_image, CV_32FC3);
-		tmp_image = tmp_image / 255.0;
+		float mean[3] = {0, 0, 0};
+		float var = 255.0;
 
 		input_image_t image;
 		image.data      = tmp_image.data;
@@ -257,7 +258,7 @@ int run_detect_model(){
 		image.channel   = tmp_image.channels();
 		image.pixel_format = PIX_FMT_RGB888;
 		
-		yolov7_tiny_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, tensor);
+		yolov7_tiny_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, mean, var, tensor);
 
 		status = vsi_nn_RunGraph(g_graph);
 		yolov7_tiny_postprocess(g_graph, &resultData);

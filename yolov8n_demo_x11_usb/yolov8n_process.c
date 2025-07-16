@@ -9,22 +9,25 @@
 #define NN_TENSOR_MAX_DIMENSION_NUMBER 4
 
 /*Preprocess*/
-void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn_width, int nn_height, int channels, vsi_nn_tensor_t *tensor)
+void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn_width, int nn_height, int channels, float* mean, float var, vsi_nn_tensor_t *tensor)
 {
     int i, j, k;
     float *src = (float *)imageData.data;
     vsi_status status = VSI_FAILURE;
+    int pixel_size = nn_width * nn_height;
     
     if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT8) {
     	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-    	int8_t* ptr = (int8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(int8_t));
+    	int8_t* ptr = (int8_t*)malloc(stride * pixel_size * channels * sizeof(int8_t));
 		
-		float fl = pow(2., tensor->attr.dtype.fl);
+		float fl = powf(2., tensor->attr.dtype.fl) / var;
 
-		for (i = 0; i < channels; i++) {
+		#pragma omp parallel for collapse(2)
+		for (k = 0; k < nn_height; k++) {
 		    for (j = 0; j < nn_width; j++) {
-		    	for (k = 0; k < nn_height; k++) {
-					ptr[stride * (nn_width * nn_height * i + nn_width * k + j)] = src[channels * nn_width * k + channels * j + i] * fl;
+		    	float* src_pix = &src[(k * nn_width + j) * channels];
+		    	for (i = 0; i < channels; i++) {
+					ptr[stride * (pixel_size * i + nn_width * k + j)] = (src_pix[i] - mean[i]) * fl;
 				}
 			}
 		}
@@ -32,14 +35,16 @@ void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn
 		free(ptr);
     }
     else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT16) {
-    	int16_t* ptr = (int16_t*)malloc(nn_width * nn_height * channels * sizeof(int16_t));
+    	int16_t* ptr = (int16_t*)malloc(pixel_size * channels * sizeof(int16_t));
 		
-		float fl = pow(2., tensor->attr.dtype.fl);
+		float fl = powf(2., tensor->attr.dtype.fl) / var;
 
-		for (i = 0; i < channels; i++) {
+		#pragma omp parallel for collapse(2)
+		for (k = 0; k < nn_height; k++) {
 		    for (j = 0; j < nn_width; j++) {
-		    	for (k = 0; k < nn_height; k++) {
-					ptr[nn_width * nn_height * i + nn_width * k + j] = src[channels * nn_width * k + channels * j + i] * fl;
+		    	float* src_pix = &src[(k * nn_width + j) * channels];
+		    	for (i = 0; i < channels; i++) {
+					ptr[pixel_size * i + nn_width * k + j] = (src_pix[i] - mean[i]) * fl;
 				}
 			}
 		}
@@ -48,15 +53,17 @@ void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn
     }
     else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_UINT8) {
     	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-    	uint8_t* ptr = (uint8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(uint8_t));
+    	uint8_t* ptr = (uint8_t*)malloc(stride * pixel_size * channels * sizeof(uint8_t));
 		
-		float scale = tensor->attr.dtype.scale;
+		float scale = tensor->attr.dtype.scale * var;
 		int zero_point = tensor->attr.dtype.zero_point;
 
-		for (i = 0; i < channels; i++) {
+		#pragma omp parallel for collapse(2)
+		for (k = 0; k < nn_height; k++) {
 		    for (j = 0; j < nn_width; j++) {
-		    	for (k = 0; k < nn_height; k++) {
-					ptr[stride * (nn_width * nn_height * i + nn_width * k + j)] = src[channels * nn_width * k + channels * j + i] / scale + zero_point;
+		    	float* src_pix = &src[(k * nn_width + j) * channels];
+		    	for (i = 0; i < channels; i++) {
+					ptr[stride * (pixel_size * i + nn_width * k + j)] = (src_pix[i] - mean[i]) / scale + zero_point;
 				}
 			}
 		}
@@ -65,12 +72,15 @@ void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn
     }
     else {
     	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-    	uint8_t* ptr = (uint8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(uint8_t));
+    	uint8_t* ptr = (uint8_t*)malloc(stride * pixel_size * channels * sizeof(uint8_t));
     	
-    	for (i = 0; i < channels; i++) {
+    	#pragma omp parallel for collapse(2)
+    	for (k = 0; k < nn_height; k++) {
 		    for (j = 0; j < nn_width; j++) {
-		    	for (k = 0; k < nn_height; k++) {
-					vsi_nn_Float32ToDtype(src[channels * nn_width * k + channels * j + i], &ptr[stride * (nn_width * nn_height * i + nn_width * k + j)], &tensor->attr.dtype);
+		    	float* src_pix = &src[(k * nn_width + j) * channels];
+		    	for (i = 0; i < channels; i++) {
+					src_pix[i] = (src_pix[i] - mean[i]) / var;
+					vsi_nn_Float32ToDtype(src_pix[i], &ptr[stride * (pixel_size * i + nn_width * k + j)], &tensor->attr.dtype);
 				}
 			}
 		}
@@ -236,9 +246,11 @@ static void get_detections_result(pDetResult resultData, int num, float thresh, 
     resultData->detect_num= detect_num;
 }
 
-static float logistic_activate(float x){return 1./(1. + exp(-x));}
+static float logistic_activate(float x){return 1./(1. + expf(-x));}
 
-static box get_region_box(float *x, int index, int i, int j, int w, int h)
+static float unsigmoid(float x){return -1. * logf((1. / x)) - 1.;}
+
+static box get_region_box(float *x, int i, int j, int w, int h)
 {
     box b;
     float tmp[4] = {0};
@@ -247,12 +259,12 @@ static box get_region_box(float *x, int index, int i, int j, int w, int h)
     	float sum = 0;
     	for (int m = 0; m < 16; m++)
     	{
-    		x[index + k * 16 + m] = exp(x[index + k * 16 + m]);
-    		sum += x[index + k * 16 + m];
+    		x[k * 16 + m] = exp(x[k * 16 + m]);
+    		sum += x[k * 16 + m];
     	}
     	for (int m = 0; m < 16; m++)
     	{
-    		tmp[k] += m * x[index + k * 16 + m] / sum;
+    		tmp[k] += m * x[k * 16 + m] / sum;
     	}
     }
     b.x = (j + 0.5 - tmp[0]) / w;
@@ -284,38 +296,190 @@ static void flatten(float *x, int size, int layers, int batch, int forward)
     free(swap);
 }
 
-int yolo_v3_post_process_onescale(float *predictions, int input_size[3] , box *boxes, float **probs, float threshold_in)
+float dequantize(void* data, int vx_type, float fl, float scale, int zero_point)
 {
-    int i,j,k,index;
+	if (vx_type == VSI_NN_TYPE_INT8) {
+	    int8_t ptr = *(int8_t*)data;
+	    return ptr * fl;
+	}
+	else if (vx_type == VSI_NN_TYPE_INT16) {
+	    int16_t ptr = *(int16_t*)data;
+	    return ptr * fl;
+	}
+	else if (vx_type == VSI_NN_TYPE_UINT8) {
+	    uint8_t ptr = *(uint8_t*)data;
+	    return (ptr - zero_point) * scale;
+	}
+	else {
+		uint8_t ptr = *(uint8_t*)data;
+		
+	    float result;
+	    vsi_nn_DtypeToFloat32(&result, &ptr, vx_type);
+	    return result;
+	}
+}
+
+int yolo_v3_post_process_onescale(void *tensor_data, int input_size[3] , box *boxes, float **probs, float threshold_in, vsi_nn_tensor_t *tensor)
+{
+    int i,j,k,m,index;
     int num_class = 80;
     int coords = 64;
     int bb_size = coords + num_class;
     int modelWidth = input_size[0];
     int modelHeight = input_size[1];
-    float threshold = threshold_in;
-    float max_prob;
-
-    for (j = 0; j < modelWidth*modelHeight; ++j)
-        probs[j] = (float *)calloc(num_class+1, sizeof(float *));
-
-    for (i = 0; i < modelHeight; ++i)
-    {
-    	for (j = 0; j < modelWidth; ++j)
-    	{
-    		index = i * modelHeight + j;
-    		max_prob = 0;
-    		for (k = 0; k < num_class; ++k)
-    		{
-    			float prob = logistic_activate(predictions[index * bb_size + k]);
-    			probs[index][k] = (prob > threshold) ? prob : 0;
-    			max_prob = (prob > threshold && prob > max_prob) ? prob : max_prob;
-    		}
-    		int box_index = index * bb_size + num_class;
-    		boxes[index] = get_region_box(predictions, box_index, i, j, modelWidth, modelHeight);
-    		boxes[index].prob_obj = (max_prob > threshold) ? max_prob : 0;
-    	}
-    }
     
+    float fl = 1;
+    float scale = 1;
+    int zero_point = 0;
+    
+    int tmp = 0;
+    
+    float threshold = unsigmoid(threshold_in);
+    
+    for (j = 0; j < modelWidth*modelHeight; ++j)
+        probs[j] = (float *)calloc(num_class, sizeof(float *));
+
+    if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT8) {
+    	fl = powf(2., -tensor->attr.dtype.fl);
+    	float converted_predictions[coords];
+    	int8_t *tmp_data = (int8_t *)tensor_data;
+    	
+    	int8_t thre_tmp = (int8_t)(threshold / fl);
+    	int8_t max_prob;
+    	int max_id = -1;
+    	
+    	#pragma omp parallel for collapse(2)
+		for (i = 0; i < modelHeight; ++i)
+		{
+			for (j = 0; j < modelWidth; ++j)
+			{
+				index = i * modelHeight + j;
+				max_prob = 0;
+				for (k = 0; k < num_class; ++k)
+				{
+					if (tmp_data[index * bb_size + k] > thre_tmp && tmp_data[index * bb_size + k] > max_prob) {
+						max_prob = tmp_data[index * bb_size + k];
+						max_id = k;
+					}
+				}
+				if (max_id >= 0) {
+					probs[index][max_id] = logistic_activate(dequantize(&tmp_data[index * bb_size + max_id], tensor->attr.dtype.vx_type, fl, scale, zero_point));
+					int box_index = index * bb_size + num_class;
+					for (m = 0; m < coords; ++m) {
+						converted_predictions[m] = dequantize(&tmp_data[box_index + m], tensor->attr.dtype.vx_type, fl, scale, zero_point);
+					}
+					boxes[index] = get_region_box(converted_predictions, i, j, modelWidth, modelHeight);
+					boxes[index].prob_obj = max_prob;
+				}
+			}
+		}
+    }
+    else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT16) {
+    	fl = powf(2., -tensor->attr.dtype.fl);
+    	float converted_predictions[coords];
+    	int16_t *tmp_data = (int16_t *)tensor_data;
+    	
+    	int16_t thre_tmp = (int16_t)(threshold / fl);
+    	int16_t max_prob;
+    	int max_id = -1;
+    	
+    	#pragma omp parallel for collapse(2)
+		for (i = 0; i < modelHeight; ++i)
+		{
+			for (j = 0; j < modelWidth; ++j)
+			{
+				index = i * modelHeight + j;
+				max_prob = 0;
+				for (k = 0; k < num_class; ++k)
+				{
+					if (tmp_data[index * bb_size + k] > thre_tmp && tmp_data[index * bb_size + k] > max_prob) {
+						max_prob = tmp_data[index * bb_size + k];
+						max_id = k;
+					}
+				}
+				if (max_id >= 0) {
+					probs[index][max_id] = logistic_activate(dequantize(&tmp_data[index * bb_size + max_id], tensor->attr.dtype.vx_type, fl, scale, zero_point));
+					int box_index = index * bb_size + num_class;
+					for (m = 0; m < coords; ++m) {
+						converted_predictions[m] = dequantize(&tmp_data[box_index + m], tensor->attr.dtype.vx_type, fl, scale, zero_point);
+					}
+					boxes[index] = get_region_box(converted_predictions, i, j, modelWidth, modelHeight);
+					boxes[index].prob_obj = max_prob;
+				}
+			}
+		}
+    }
+    else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_UINT8) {
+    	scale = tensor->attr.dtype.scale;
+		zero_point = tensor->attr.dtype.zero_point;
+		float converted_predictions[coords];
+    	uint8_t *tmp_data = (uint8_t *)tensor_data;
+    	
+    	uint8_t thre_tmp = (uint8_t)(threshold / zero_point + zero_point);
+    	uint8_t max_prob;
+    	int max_id = -1;
+    	#pragma omp parallel for collapse(2)
+		for (i = 0; i < modelHeight; ++i)
+		{
+			for (j = 0; j < modelWidth; ++j)
+			{
+				index = i * modelHeight + j;
+				max_prob = 0;
+				for (k = 0; k < num_class; ++k)
+				{
+					if (tmp_data[index * bb_size + k] > thre_tmp && tmp_data[index * bb_size + k] > max_prob) {
+						max_prob = tmp_data[index * bb_size + k];
+						max_id = k;
+					}
+				}
+				if (max_id >= 0) {
+					probs[index][max_id] = logistic_activate(dequantize(&tmp_data[index * bb_size + max_id], tensor->attr.dtype.vx_type, fl, scale, zero_point));
+					int box_index = index * bb_size + num_class;
+					for (m = 0; m < coords; ++m) {
+						converted_predictions[m] = dequantize(&tmp_data[box_index + m], tensor->attr.dtype.vx_type, fl, scale, zero_point);
+					}
+					boxes[index] = get_region_box(converted_predictions, i, j, modelWidth, modelHeight);
+					boxes[index].prob_obj = max_prob;
+				}
+			}
+		}
+    }
+    else {
+    	scale = tensor->attr.dtype.scale;
+		zero_point = tensor->attr.dtype.zero_point;
+		float converted_predictions[coords];
+    	uint8_t *tmp_data = (uint8_t *)tensor_data;
+    	
+    	uint8_t thre_tmp;
+    	vsi_nn_Float32ToDtype(threshold, &thre_tmp, &tensor->attr.dtype);
+    	uint8_t max_prob;
+    	int max_id = -1;
+    	#pragma omp parallel for collapse(2)
+		for (i = 0; i < modelHeight; ++i)
+		{
+			for (j = 0; j < modelWidth; ++j)
+			{
+				index = i * modelHeight + j;
+				max_prob = 0;
+				for (k = 0; k < num_class; ++k)
+				{
+					if (tmp_data[index * bb_size + k] > thre_tmp && tmp_data[index * bb_size + k] > max_prob) {
+						max_prob = tmp_data[index * bb_size + k];
+						max_id = k;
+					}
+				}
+				if (max_id >= 0) {
+					probs[index][max_id] = logistic_activate(dequantize(&tmp_data[index * bb_size + max_id], tensor->attr.dtype.vx_type, fl, scale, zero_point));
+					int box_index = index * bb_size + num_class;
+					for (m = 0; m < coords; ++m) {
+						converted_predictions[m] = dequantize(&tmp_data[box_index + m], tensor->attr.dtype.vx_type, fl, scale, zero_point);
+					}
+					boxes[index] = get_region_box(converted_predictions, i, j, modelWidth, modelHeight);
+					boxes[index].prob_obj = max_prob;
+				}
+			}
+		}
+    }
     return 0;
 }
 
@@ -329,86 +493,13 @@ void yolov8n_postprocess(vsi_nn_graph_t *graph, pDetResult resultData)
     nn_height = tensor->attr.size[1];
     nn_channel = tensor->attr.size[2];
     (void)nn_channel;
-    int size[3]={nn_width/32, nn_height/32, 80 + 64};
 
-    int sz[10];
     int i, j, stride;
-    int output_cnt = 0;
-    int output_len = 0;
     int num_class = 80;
     float threshold = 0.3;
     float iou_threshold = 0.4;
-    float *predictions = NULL;
-
-    for (i = 0; i < graph->output.num; i++) {
-        tensor = vsi_nn_GetTensor(graph, graph->output.tensors[i]);
-        sz[i] = 1;
-        for (j = 0; j < tensor->attr.dim_num; j++) {
-            sz[i] *= tensor->attr.size[j];
-        }
-        output_len += sz[i];
-    }
-    predictions = (float *)malloc(sizeof(float) * output_len);
-
-    for (i = 0; i < graph->output.num; i++) {
-        tensor = vsi_nn_GetTensor(graph, graph->output.tensors[i]);
-        
-        if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT8) {
-		    int8_t *tensor_data = NULL;
-		    float fl = pow(2., -tensor->attr.dtype.fl);
-
-		    stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-		    tensor_data = (int8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
-
-		    for (j = 0; j < sz[i]; j++)
-		    {
-		    	predictions[output_cnt] = tensor_data[stride * j] * fl;
-		    	output_cnt++;
-		    }
-		    vsi_nn_Free(tensor_data);
-		}
-		else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT16) {
-		    int16_t *tensor_data = NULL;
-		    float fl = pow(2., -tensor->attr.dtype.fl);
-
-		    tensor_data = (int16_t *)vsi_nn_ConvertTensorToData(graph, tensor);
-
-		    for (j = 0; j < sz[i]; j++)
-		    {
-		    	predictions[output_cnt] = tensor_data[j] * fl;
-		    	output_cnt++;
-		    }
-		    vsi_nn_Free(tensor_data);
-		}
-		else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_UINT8) {
-		    uint8_t *tensor_data = NULL;
-		    float scale = tensor->attr.dtype.scale;
-			int zero_point = tensor->attr.dtype.zero_point;
-
-		    stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-		    tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
-
-		    for (j = 0; j < sz[i]; j++)
-		    {
-		    	predictions[output_cnt] = (tensor_data[stride * j] - zero_point) * scale;
-		    	output_cnt++;
-		    }
-		    vsi_nn_Free(tensor_data);
-		}
-		else {
-			uint8_t *tensor_data = NULL;
-			
-			stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-			tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
-			
-			for (j = 0; j < sz[i]; j++)
-		    {
-		    	vsi_nn_DtypeToFloat32(&tensor_data[stride * j], &predictions[output_cnt], &tensor->attr.dtype);
-		    	output_cnt++;
-		    }
-		    vsi_nn_Free(tensor_data);
-		}
-    }
+    
+    int size[3]={nn_width/32, nn_height/32, num_class + 64};
 
     int size2[3] = {size[0]*2,size[1]*2,size[2]};
     int size4[3] = {size[0]*4,size[1]*4,size[2]};
@@ -417,18 +508,59 @@ void yolov8n_postprocess(vsi_nn_graph_t *graph, pDetResult resultData)
 
     box *boxes = (box *)calloc(box1*(1+4+16), sizeof(box));
     float **probs = (float **)calloc(box1*(1+4+16), sizeof(float *));
-
-    yolo_v3_post_process_onescale(&predictions[0], size4, boxes, &probs[0], threshold); //final layer
-    yolo_v3_post_process_onescale(&predictions[len1*16], size2, &boxes[box1*16], &probs[box1*16], threshold);
-    yolo_v3_post_process_onescale(&predictions[len1*(16+4)], size,  &boxes[box1*(16+4)], &probs[box1*(16+4)], threshold);
+    
+    for (i = 0; i < graph->output.num; i++) {
+    	tensor = vsi_nn_GetTensor(graph, graph->output.tensors[i]);
+    	int vx_type = tensor->attr.dtype.vx_type;
+    	if (vx_type == VSI_NN_TYPE_INT8) {
+    		int8_t *tensor_data = NULL;
+    		tensor_data = (int8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+    		if (i == 0) {
+    			yolo_v3_post_process_onescale(tensor_data, size4, boxes, &probs[0], threshold, tensor);
+    		}
+    		else if (i == 1) {
+    			yolo_v3_post_process_onescale(tensor_data, size2, &boxes[box1*16], &probs[box1*16], threshold, tensor);
+    		}
+    		else if (i == 2) {
+    			yolo_v3_post_process_onescale(tensor_data, size, &boxes[box1*(16+4)], &probs[box1*(16+4)], threshold, tensor);
+    		}
+    		vsi_nn_Free(tensor_data);
+    	}
+    	else if (vx_type == VSI_NN_TYPE_INT16) {
+    		int16_t *tensor_data = NULL;
+    		tensor_data = (int16_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+    		if (i == 0) {
+    			yolo_v3_post_process_onescale(tensor_data, size4, boxes, &probs[0], threshold, tensor);
+    		}
+    		else if (i == 1) {
+    			yolo_v3_post_process_onescale(tensor_data, size2, &boxes[box1*16], &probs[box1*16], threshold, tensor);
+    		}
+    		else if (i == 2) {
+    			yolo_v3_post_process_onescale(tensor_data, size, &boxes[box1*(16+4)], &probs[box1*(16+4)], threshold, tensor);
+    		}
+    		vsi_nn_Free(tensor_data);
+    	}
+    	else {
+    		uint8_t *tensor_data = NULL;
+    		tensor_data = (uint8_t *)vsi_nn_ConvertTensorToData(graph, tensor);
+    		if (i == 0) {
+    			yolo_v3_post_process_onescale(tensor_data, size4, boxes, &probs[0], threshold, tensor);
+    		}
+    		else if (i == 1) {
+    			yolo_v3_post_process_onescale(tensor_data, size2, &boxes[box1*16], &probs[box1*16], threshold, tensor);
+    		}
+    		else if (i == 2) {
+    			yolo_v3_post_process_onescale(tensor_data, size, &boxes[box1*(16+4)], &probs[box1*(16+4)], threshold, tensor);
+    		}
+    		vsi_nn_Free(tensor_data);
+    	}
+    }
     do_nms_sort(boxes, probs, box1*21, num_class, iou_threshold);
     get_detections_result(resultData, box1*21, threshold, boxes, probs, coco_names, num_class);
 
     free(boxes);
     boxes = NULL;
-
-    if (predictions) free(predictions);
-
+    
     for (j = 0; j < box1*(1+4+16); ++j) {
         free(probs[j]);
     }

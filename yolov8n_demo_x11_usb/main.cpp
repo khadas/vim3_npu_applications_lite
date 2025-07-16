@@ -244,11 +244,12 @@ int run_detect_model(){
 		else if (type == "mipi") {
 			read_mipi_frame(&img);
 		}
-
+		
 		cv::resize(img, tmp_image, tmp_image.size());
 		cv::cvtColor(tmp_image, tmp_image, cv::COLOR_BGR2RGB);
 		tmp_image.convertTo(tmp_image, CV_32FC3);
-		tmp_image = tmp_image / 255.0;
+		float mean[3] = {0, 0, 0};
+		float var = 255.0;
 
 		input_image_t image;
 		image.data      = tmp_image.data;
@@ -257,13 +258,14 @@ int run_detect_model(){
 		image.channel   = tmp_image.channels();
 		image.pixel_format = PIX_FMT_RGB888;
 		
-		yolov8n_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, tensor);
-		
+		yolov8n_preprocess(image, g_graph, g_nn_width, g_nn_height, g_nn_channel, mean, var, tensor);
+
 		status = vsi_nn_RunGraph(g_graph);
 		yolov8n_postprocess(g_graph, &resultData);
 		
 		draw_results(img, resultData, width, height);
 		gettimeofday(&time_end, 0);
+		
 		++frames;
 		total_time += (float)((time_end.tv_sec - time_start.tv_sec) + (time_end.tv_usec - time_start.tv_usec) / 1000.0f / 1000.0f);
 		//printf("total %f ms\n", (float)((time_end.tv_sec - time_start.tv_sec) + (time_end.tv_usec - time_start.tv_usec) / 1000.0f / 1000.0f));

@@ -9,22 +9,25 @@
 #define NN_TENSOR_MAX_DIMENSION_NUMBER 4
 
 /*Preprocess*/
-void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn_width, int nn_height, int channels, vsi_nn_tensor_t *tensor)
+void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn_width, int nn_height, int channels, float* mean, float var, vsi_nn_tensor_t *tensor)
 {
     int i, j, k;
     float *src = (float *)imageData.data;
     vsi_status status = VSI_FAILURE;
+    int pixel_size = nn_width * nn_height;
     
     if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT8) {
     	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-    	int8_t* ptr = (int8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(int8_t));
+    	int8_t* ptr = (int8_t*)malloc(stride * pixel_size * channels * sizeof(int8_t));
 		
-		float fl = pow(2., tensor->attr.dtype.fl);
+		float fl = powf(2., tensor->attr.dtype.fl) / var;
 
-		for (i = 0; i < channels; i++) {
+		#pragma omp parallel for collapse(2)
+		for (k = 0; k < nn_height; k++) {
 		    for (j = 0; j < nn_width; j++) {
-		    	for (k = 0; k < nn_height; k++) {
-					ptr[stride * (nn_width * nn_height * i + nn_width * k + j)] = src[channels * nn_width * k + channels * j + i] * fl;
+		    	float* src_pix = &src[(k * nn_width + j) * channels];
+		    	for (i = 0; i < channels; i++) {
+					ptr[stride * (pixel_size * i + nn_width * k + j)] = (src_pix[i] - mean[i]) * fl;
 				}
 			}
 		}
@@ -32,14 +35,16 @@ void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn
 		free(ptr);
     }
     else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_INT16) {
-    	int16_t* ptr = (int16_t*)malloc(nn_width * nn_height * channels * sizeof(int16_t));
+    	int16_t* ptr = (int16_t*)malloc(pixel_size * channels * sizeof(int16_t));
 		
-		float fl = pow(2., tensor->attr.dtype.fl);
+		float fl = powf(2., tensor->attr.dtype.fl) / var;
 
-		for (i = 0; i < channels; i++) {
+		#pragma omp parallel for collapse(2)
+		for (k = 0; k < nn_height; k++) {
 		    for (j = 0; j < nn_width; j++) {
-		    	for (k = 0; k < nn_height; k++) {
-					ptr[nn_width * nn_height * i + nn_width * k + j] = src[channels * nn_width * k + channels * j + i] * fl;
+		    	float* src_pix = &src[(k * nn_width + j) * channels];
+		    	for (i = 0; i < channels; i++) {
+					ptr[pixel_size * i + nn_width * k + j] = (src_pix[i] - mean[i]) * fl;
 				}
 			}
 		}
@@ -48,15 +53,17 @@ void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn
     }
     else if (tensor->attr.dtype.vx_type == VSI_NN_TYPE_UINT8) {
     	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-    	uint8_t* ptr = (uint8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(uint8_t));
+    	uint8_t* ptr = (uint8_t*)malloc(stride * pixel_size * channels * sizeof(uint8_t));
 		
-		float scale = tensor->attr.dtype.scale;
+		float scale = tensor->attr.dtype.scale * var;
 		int zero_point = tensor->attr.dtype.zero_point;
 
-		for (i = 0; i < channels; i++) {
+		#pragma omp parallel for collapse(2)
+		for (k = 0; k < nn_height; k++) {
 		    for (j = 0; j < nn_width; j++) {
-		    	for (k = 0; k < nn_height; k++) {
-					ptr[stride * (nn_width * nn_height * i + nn_width * k + j)] = src[channels * nn_width * k + channels * j + i] / scale + zero_point;
+		    	float* src_pix = &src[(k * nn_width + j) * channels];
+		    	for (i = 0; i < channels; i++) {
+					ptr[stride * (pixel_size * i + nn_width * k + j)] = (src_pix[i] - mean[i]) / scale + zero_point;
 				}
 			}
 		}
@@ -65,12 +72,15 @@ void yolov8n_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn
     }
     else {
     	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-    	uint8_t* ptr = (uint8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(uint8_t));
+    	uint8_t* ptr = (uint8_t*)malloc(stride * pixel_size * channels * sizeof(uint8_t));
     	
-    	for (i = 0; i < channels; i++) {
+    	#pragma omp parallel for collapse(2)
+    	for (k = 0; k < nn_height; k++) {
 		    for (j = 0; j < nn_width; j++) {
-		    	for (k = 0; k < nn_height; k++) {
-					vsi_nn_Float32ToDtype(src[channels * nn_width * k + channels * j + i], &ptr[stride * (nn_width * nn_height * i + nn_width * k + j)], &tensor->attr.dtype);
+		    	float* src_pix = &src[(k * nn_width + j) * channels];
+		    	for (i = 0; i < channels; i++) {
+					src_pix[i] = (src_pix[i] - mean[i]) / var;
+					vsi_nn_Float32ToDtype(src_pix[i], &ptr[stride * (pixel_size * i + nn_width * k + j)], &tensor->attr.dtype);
 				}
 			}
 		}

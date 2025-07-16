@@ -9,19 +9,23 @@
 #define NN_TENSOR_MAX_DIMENSION_NUMBER 4
 
 /*Preprocess*/
-void densenet_ctc_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn_width, int nn_height, int channels, vsi_nn_tensor_t *tensor)
+void densenet_ctc_preprocess(input_image_t imageData, vsi_nn_graph_t *g_graph, int nn_width, int nn_height, int channels, float* mean, float var, vsi_nn_tensor_t *tensor)
 {
     int i, j, k;
     float *src = (float *)imageData.data;
-	vsi_status status = VSI_FAILURE;
+    vsi_status status = VSI_FAILURE;
+    int pixel_size = nn_width * nn_height;
     
 	vsi_size_t stride = vsi_nn_TypeGetBytes(tensor->attr.dtype.vx_type);
-	uint8_t* ptr = (uint8_t*)malloc(stride * nn_width * nn_height * channels * sizeof(uint8_t));
+	uint8_t* ptr = (uint8_t*)malloc(stride * pixel_size * channels * sizeof(uint8_t));
 	
-	for (i = 0; i < channels; i++) {
+	#pragma omp parallel for collapse(2)
+	for (k = 0; k < nn_height; k++) {
 	    for (j = 0; j < nn_width; j++) {
-	    	for (k = 0; k < nn_height; k++) {
-				vsi_nn_Float32ToDtype(src[channels * nn_width * k + channels * j + i], &ptr[stride * (nn_width * nn_height * i + nn_width * k + j)], &tensor->attr.dtype);
+	    	float* src_pix = &src[(k * nn_width + j) * channels];
+	    	for (i = 0; i < channels; i++) {
+				src_pix[i] = (src_pix[i] - mean[i]) / var;
+				vsi_nn_Float32ToDtype(src_pix[i], &ptr[stride * (pixel_size * i + nn_width * k + j)], &tensor->attr.dtype);
 			}
 		}
 	}
