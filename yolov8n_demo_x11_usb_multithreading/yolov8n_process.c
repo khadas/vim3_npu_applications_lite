@@ -248,7 +248,7 @@ static void get_detections_result(pDetResult resultData, int num, float thresh, 
 
 static float logistic_activate(float x){return 1./(1. + expf(-x));}
 
-static float unsigmoid(float x){return -1. * logf((1. / x)) - 1.;}
+static float unsigmoid(float x){return logf(x / (1. - x));}
 
 static box get_region_box(float *x, int i, int j, int w, int h)
 {
@@ -335,6 +335,7 @@ int yolo_v3_post_process_onescale(void *tensor_data, int input_size[3] , box *bo
     int tmp = 0;
     
     float threshold = unsigmoid(threshold_in);
+    float tmp_max_prob = unsigmoid(1e-6);
     
     for (j = 0; j < modelWidth*modelHeight; ++j)
         probs[j] = (float *)calloc(num_class, sizeof(float *));
@@ -345,7 +346,7 @@ int yolo_v3_post_process_onescale(void *tensor_data, int input_size[3] , box *bo
     	int8_t *tmp_data = (int8_t *)tensor_data;
     	
     	int8_t thre_tmp = (int8_t)(threshold / fl);
-    	int8_t max_prob;
+    	int8_t init_max_prob = (int8_t)(tmp_max_prob / fl);
     	int max_id = -1;
     	
     	#pragma omp parallel for collapse(2)
@@ -354,7 +355,7 @@ int yolo_v3_post_process_onescale(void *tensor_data, int input_size[3] , box *bo
 			for (j = 0; j < modelWidth; ++j)
 			{
 				index = i * modelHeight + j;
-				max_prob = 0;
+				int8_t max_prob = init_max_prob;
 				for (k = 0; k < num_class; ++k)
 				{
 					if (tmp_data[index * bb_size + k] > thre_tmp && tmp_data[index * bb_size + k] > max_prob) {
@@ -363,13 +364,14 @@ int yolo_v3_post_process_onescale(void *tensor_data, int input_size[3] , box *bo
 					}
 				}
 				if (max_id >= 0) {
-					probs[index][max_id] = logistic_activate(dequantize(&tmp_data[index * bb_size + max_id], tensor->attr.dtype.vx_type, fl, scale, zero_point));
+					float prob = logistic_activate(dequantize(&tmp_data[index * bb_size + max_id], tensor->attr.dtype.vx_type, fl, scale, zero_point));
+					probs[index][max_id] = prob;
 					int box_index = index * bb_size + num_class;
 					for (m = 0; m < coords; ++m) {
 						converted_predictions[m] = dequantize(&tmp_data[box_index + m], tensor->attr.dtype.vx_type, fl, scale, zero_point);
 					}
 					boxes[index] = get_region_box(converted_predictions, i, j, modelWidth, modelHeight);
-					boxes[index].prob_obj = max_prob;
+					boxes[index].prob_obj = prob;
 				}
 			}
 		}
